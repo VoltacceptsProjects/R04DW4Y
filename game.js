@@ -10,6 +10,11 @@
   const ctx = canvas.getContext('2d', { alpha: false });
   ctx.imageSmoothingEnabled = false;
 
+  const overlayCanvas = document.createElement('canvas');
+  overlayCanvas.width = WIDTH;
+  overlayCanvas.height = HEIGHT;
+  const overlayCtx = overlayCanvas.getContext('2d', { alpha: true });
+
   const loadingEl = document.getElementById('loading');
   const cursorDot = document.getElementById('crosshair-cursor');
 
@@ -43,10 +48,12 @@
 
   let musicMuted = Store.get('music_muted', false);
   let backgroundIsGravel = Store.get('gravel_road', true);
+  let darkeningEnabled = Store.get('darkening_enabled', true);
 
   function saveSettings() {
     Store.set('music_muted', musicMuted);
     Store.set('gravel_road', backgroundIsGravel);
+    Store.set('darkening_enabled', darkeningEnabled);
   }
 
   function loadHighscores() {
@@ -67,8 +74,10 @@
     return new Promise((resolve) => {
       const img = new Image();
       img.onload = () => resolve(img);
-      img.onerror = () => { console.warn('Missing image:', src);
-        resolve(null); };
+      img.onerror = () => {
+        console.warn('Missing image:', src);
+        resolve(null);
+      };
       img.src = src;
     });
   }
@@ -126,6 +135,75 @@
   let clickQueue = [];
   let keyDownQueue = [];
 
+  // -- Touch controls: hidden until the screen is actually touched --------
+  let touchMode = false;
+  const activeTouches = new Map(); // touchId -> {x, y}
+
+  const MOVE_ICON_SIZE = 72;
+  const MOVE_BTN_R = 55;
+  const MOVE_BTN_Y = 525;
+  const MOVE_LEFT_X = 95;
+  const MOVE_RIGHT_X = 705;
+
+  const KB_KEY = 56;
+  const KB_GAP = 6;
+  const KB_ROW_GAP = 10;
+  const KB_BACKSPACE_ICON = 34;
+
+  function canvasPointFromTouch(t) {
+    const r = canvas.getBoundingClientRect();
+    return {
+      x: ((t.clientX - r.left) / r.width) * WIDTH,
+      y: ((t.clientY - r.top) / r.height) * HEIGHT,
+    };
+  }
+
+  function enableTouchMode() {
+    if (touchMode) return;
+    touchMode = true;
+    cursorDot.classList.remove('active');
+  }
+
+  function handleTouchStart(e) {
+    e.preventDefault();
+    enableTouchMode();
+    for (const t of e.changedTouches) {
+      const p = canvasPointFromTouch(t);
+      activeTouches.set(t.identifier, p);
+      mouse.x = p.x;
+      mouse.y = p.y;
+      mouse.down = true;
+      clickQueue.push({ x: p.x, y: p.y });
+    }
+  }
+  function handleTouchMove(e) {
+    e.preventDefault();
+    for (const t of e.changedTouches) {
+      if (!activeTouches.has(t.identifier)) continue;
+      const p = canvasPointFromTouch(t);
+      activeTouches.set(t.identifier, p);
+      mouse.x = p.x;
+      mouse.y = p.y;
+    }
+  }
+  function handleTouchEnd(e) {
+    e.preventDefault();
+    for (const t of e.changedTouches) activeTouches.delete(t.identifier);
+    if (activeTouches.size === 0) mouse.down = false;
+  }
+
+  canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
+  canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
+  canvas.addEventListener('touchend', handleTouchEnd, { passive: false });
+  canvas.addEventListener('touchcancel', handleTouchEnd, { passive: false });
+
+  function touchZoneActive(cx, cy, r) {
+    for (const p of activeTouches.values()) {
+      if (pointInCircle(p.x, p.y, cx, cy, r)) return true;
+    }
+    return false;
+  }
+
   window.addEventListener('keydown', (e) => {
     keys.add(e.key);
     keyDownQueue.push(e.key);
@@ -164,6 +242,27 @@
   function pointInCircle(px, py, cx, cy, r) {
     return (px - cx) ** 2 + (py - cy) ** 2 <= r * r;
   }
+  function wasClickedCircle(cx, cy, r, frameClicks) {
+    for (let i = 0; i < frameClicks.length; i++) {
+      const p = frameClicks[i];
+      if (pointInCircle(p.x, p.y, cx, cy, r)) {
+        frameClicks.splice(i, 1);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  const CURSOR_HITBOX_HALF = 4;
+  const GEAR_SPIN_SPEED = 3;
+
+  const TOOLTIP_ARROW_FRAC = 0.19;
+  const TOOLTIP_W = 204, TOOLTIP_H = 40;
+  const TOOLTIP_GAP = 6;
+  function boxInRect(px, py, rect) {
+    return px + CURSOR_HITBOX_HALF >= rect.x && px - CURSOR_HITBOX_HALF <= rect.x + rect.w &&
+      py + CURSOR_HITBOX_HALF >= rect.y && py - CURSOR_HITBOX_HALF <= rect.y + rect.h;
+  }
 
   // ---------------------------------------------------------------------
   // TIMING HELPERS
@@ -184,25 +283,36 @@
   let isGameRunning = false;
   let isPaused = false;
   let menuBackRequested = false;
-  
+
   async function boot() {
     const [
-      playerImg, enemyImg, settingsImg,
+      playerImg, enemyImg, lightsImg, settingsImg,
       buttonImg, buttonHoverImg, buttonPressedImg,
       toggleBgImg, toggleHandleImg,
+      tooltipLeftImg, tooltipRightImg,
       dirtImg, gravelImg,
+      mobileLeftImg, mobileRightImg,
+      keyImg, keyPressedImg, backspaceIconImg,
       fontFamily
     ] = await Promise.all([
       loadImage('Data/Sprites/player.png'),
       loadImage('Data/Sprites/enemy.png'),
+      loadImage('Data/Sprites/lights.png'),
       loadImage('Data/Icons/settings.png'),
       loadImage('Data/UI/Button/button.png'),
       loadImage('Data/UI/Button/button_hover.png'),
       loadImage('Data/UI/Button/button_pressed.png'),
       loadImage('Data/UI/Toggle/Background.png'),
       loadImage('Data/UI/Toggle/Handle.png'),
+      loadImage('Data/UI/Tooltip/left.png'),
+      loadImage('Data/UI/Tooltip/right.png'),
       loadImage('Data/Backgrounds/dirt_road.png'),
       loadImage('Data/Backgrounds/gravel_road.png'),
+      loadImage('Data/UI/Mobile/left.png'),
+      loadImage('Data/UI/Mobile/right.png'),
+      loadImage('Data/UI/Mobile/keyboard/key.png'),
+      loadImage('Data/UI/Mobile/keyboard/key_pressed.png'),
+      loadImage('Data/UI/Mobile/keyboard/backspace.png'),
       loadFont('GameFont', 'Data/Fonts/default.ttf'),
     ]);
     FONT_FAMILY = fontFamily;
@@ -211,7 +321,10 @@
       SPRITE_H = 104;
     sprites.player = tintScaled(playerImg, SPRITE_W, SPRITE_H, PLAYER_COLOR);
     sprites.enemy = tintScaled(enemyImg, SPRITE_W, SPRITE_H, ENEMY_COLOR);
-    sprites.settingsIcon = scaleToCanvas(settingsImg, 32, 32);
+    const LIGHTS_W = SPRITE_W,
+      LIGHTS_H = SPRITE_H * 2;
+    sprites.lights = scaleToCanvas(lightsImg, LIGHTS_W, LIGHTS_H);
+    sprites.settingsIcon = scaleToCanvas(settingsImg, 46, 46);
 
     const BTN_W = 242,
       BTN_H = 48;
@@ -241,10 +354,20 @@
     sprites.toggleBgOff = tintScaled(toggleBgImg, TOGGLE_W, TOGGLE_H, [200, 100, 100]);
     sprites.toggleHandle = scaleToCanvas(toggleHandleImg, HANDLE_S, HANDLE_S);
 
+    sprites.tooltipLeft = scaleToCanvas(tooltipLeftImg, TOOLTIP_W, TOOLTIP_H);
+    sprites.tooltipRight = scaleToCanvas(tooltipRightImg, TOOLTIP_W, TOOLTIP_H);
+
     backgrounds.gravel = scaleBackground(gravelImg);
     backgrounds.dirt = scaleBackground(dirtImg);
 
-    // set crosshair cursor sprite
+    sprites.mobileLeft = tintScaled(mobileLeftImg, MOVE_ICON_SIZE, MOVE_ICON_SIZE, WHITE);
+    sprites.mobileRight = tintScaled(mobileRightImg, MOVE_ICON_SIZE, MOVE_ICON_SIZE, WHITE);
+    sprites.key = {
+      normal: scaleToCanvas(keyImg, KB_KEY, KB_KEY),
+      pressed: scaleToCanvas(keyPressedImg, KB_KEY, KB_KEY),
+    };
+    sprites.backspaceIcon = scaleToCanvas(backspaceIconImg, KB_BACKSPACE_ICON, KB_BACKSPACE_ICON);
+
     cursorDot.src = 'Data/UI/crosshair.png';
 
     music = new Audio('Data/Soundtracks/menu.ogg');
@@ -270,7 +393,7 @@
   function unlockAudioOnce() {
     if (audioUnlockAttempted) return;
     audioUnlockAttempted = true;
-    if (music && !musicMuted && music.paused) music.play().catch(() => {});
+    if (music && !musicMuted && music.paused) music.play().catch(() => { });
   }
   window.addEventListener('pointerdown', unlockAudioOnce, { once: true });
   window.addEventListener('keydown', unlockAudioOnce, { once: true });
@@ -290,8 +413,9 @@
     ctx.fillText(str, x, y);
   }
   function overlay(alpha) {
-    ctx.fillStyle = `rgba(0,0,0,${alpha})`;
-    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+    overlayCtx.clearRect(0, 0, WIDTH, HEIGHT);
+    overlayCtx.fillStyle = `rgba(0,0,0,${alpha})`;
+    overlayCtx.fillRect(0, 0, WIDTH, HEIGHT);
   }
   function panel(x, y, w, h) {
     ctx.fillStyle = rgb(BG_COLOR);
@@ -301,31 +425,126 @@
     ctx.strokeRect(x, y, w, h);
   }
 
-  function drawButton(sprite, cx, cy, w, h, label, fontSize, textColor) {
+  let hoveredTooltip = null;
+  function resetTooltip() { hoveredTooltip = null; }
+
+  function drawButton(sprite, cx, cy, w, h, label, fontSize, textColor, tooltipText) {
     const rect = { x: cx - w / 2, y: cy - h / 2, w, h };
-    const hovered = pointInRect(mouse.x, mouse.y, rect);
+    const hovered = boxInRect(mouse.x, mouse.y, rect);
     const img = hovered ? sprite.hover : sprite.normal;
     ctx.drawImage(img, rect.x, rect.y, w, h);
     text(label, fontSize, textColor, cx, cy + 2);
+    if (hovered && tooltipText) hoveredTooltip = { rect, label: tooltipText };
     return { rect, hovered };
+  }
+  
+  function drawTooltip(rect, label) {
+    const cx = rect.x + rect.w / 2;
+    const cy = rect.y + rect.h / 2;
+    const onLeft = cx > WIDTH / 2;
+    const sprite = onLeft ? sprites.tooltipLeft : sprites.tooltipRight;
+    if (!sprite) return;
+
+    const x = onLeft ? rect.x - TOOLTIP_GAP - TOOLTIP_W : rect.x + rect.w + TOOLTIP_GAP;
+    const y = cy - TOOLTIP_H / 2;
+    ctx.drawImage(sprite, x, y, TOOLTIP_W, TOOLTIP_H);
+
+    const labelW = TOOLTIP_W * (1 - TOOLTIP_ARROW_FRAC);
+    const textCenterX = onLeft ? x + labelW / 2 : x + TOOLTIP_W - labelW / 2;
+    text(label, 18, TEXT_COLOR, textCenterX, y + TOOLTIP_H / 2 + 1);
+  }
+
+  function drawTooltipIfAny() {
+    if (hoveredTooltip) {
+      drawTooltip(hoveredTooltip.rect, hoveredTooltip.label);
+      hoveredTooltip = null;
+    }
   }
 
   function wasClicked(rect, frameClicks) {
-    for (const p of frameClicks) {
-      if (pointInRect(p.x, p.y, rect)) return true;
+    for (let i = 0; i < frameClicks.length; i++) {
+      const p = frameClicks[i];
+      if (boxInRect(p.x, p.y, rect)) {
+        frameClicks.splice(i, 1);
+        return true;
+      }
     }
     return false;
   }
 
-  function drawToggle(cx, cy, state, label) {
+  function drawToggle(cx, cy, state, label, tooltipText) {
     text(label, 36, TEXT_COLOR, cx - 200, cy + 2, 'left');
     const rect = { x: cx, y: cy - 16, w: 64, h: 32 };
     ctx.drawImage(state ? sprites.toggleBgOn : sprites.toggleBgOff, rect.x, rect.y, 64, 32);
     const handleX = state ? cx + 50 : cx + 10;
-    // Only the handle itself is clickable/tappable, not the whole track.
     const handleRect = { x: handleX - 16, y: cy - 16, w: 32, h: 32 };
     ctx.drawImage(sprites.toggleHandle, handleRect.x, handleRect.y, 32, 32);
-    return handleRect;
+
+    const hovered = boxInRect(mouse.x, mouse.y, rect);
+    if (hovered && tooltipText) hoveredTooltip = { rect, label: tooltipText };
+
+    return rect;
+  }
+
+  // ---------------------------------------------------------------------
+  // TOUCH CONTROLS (movement pad, pause button, on-screen keyboard)
+  // ---------------------------------------------------------------------
+  function drawMoveButton(cx, cy, icon) {
+    ctx.drawImage(icon, cx - MOVE_ICON_SIZE / 2, cy - MOVE_ICON_SIZE / 2, MOVE_ICON_SIZE, MOVE_ICON_SIZE);
+  }
+
+  function drawMovementControls() {
+    drawMoveButton(MOVE_LEFT_X, MOVE_BTN_Y, sprites.mobileLeft);
+    drawMoveButton(MOVE_RIGHT_X, MOVE_BTN_Y, sprites.mobileRight);
+  }
+
+  function drawTouchPauseButton(frameClicks) {
+    const cx = 750, cy = 50, r = 20;
+    ctx.drawImage(sprites.settingsIcon, cx - 23, cy - 23, 46, 46);
+    return wasClickedCircle(cx, cy, r, frameClicks);
+  }
+
+  function buildKeyboardLayout() {
+    const startY = 230;
+    const rowsDef = [
+      ['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'],
+      ['A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L'],
+      ['Z', 'X', 'C', 'V', 'B', 'N', 'M', 'BACK', 'ENTER'],
+    ];
+    const layout = [];
+    rowsDef.forEach((rowKeys, rowIdx) => {
+      const y = startY + rowIdx * (KB_KEY + KB_ROW_GAP);
+      const w = rowKeys.length * KB_KEY + (rowKeys.length - 1) * KB_GAP;
+      let x = (WIDTH - w) / 2;
+      for (const value of rowKeys) {
+        layout.push({ x, y, w: KB_KEY, h: KB_KEY, value });
+        x += KB_KEY + KB_GAP;
+      }
+    });
+    return layout;
+  }
+
+  function drawTouchKeyboard(frameClicks) {
+    const layout = buildKeyboardLayout();
+    const tapped = [];
+    for (const k of layout) {
+      const rect = { x: k.x, y: k.y, w: k.w, h: k.h };
+      const pressed = boxInRect(mouse.x, mouse.y, rect) && mouse.down;
+      const sprite = pressed ? sprites.key.pressed : sprites.key.normal;
+      ctx.drawImage(sprite, rect.x, rect.y, rect.w, rect.h);
+
+      if (k.value === 'BACK') {
+        const s = KB_BACKSPACE_ICON;
+        ctx.drawImage(sprites.backspaceIcon, rect.x + rect.w / 2 - s / 2, rect.y + rect.h / 2 - s / 2, s, s);
+      } else {
+        const label = k.value === 'ENTER' ? 'OK' : k.value;
+        const fontSize = k.value.length > 1 ? 20 : 28;
+        text(label, fontSize, TEXT_COLOR, rect.x + rect.w / 2, rect.y + rect.h / 2 + 2);
+      }
+
+      if (wasClicked(rect, frameClicks)) tapped.push(k.value);
+    }
+    return tapped;
   }
 
   // ===========================================================================
@@ -333,7 +552,6 @@
   // ===========================================================================
 
   async function mainMenu() {
-    // Force a full clean canvas and reset any lingering overlay
     clear(BG_COLOR);
     ctx.clearRect(0, 0, WIDTH, HEIGHT);
 
@@ -346,6 +564,7 @@
     while (true) {
       await nextFrame();
       const frameClicks = consumeClicks();
+      resetTooltip();
 
       if (menuBackRequested) {
         if (settingsOpen) {
@@ -368,27 +587,45 @@
         quitClicked = false;
 
       if (!settingsOpen && !showHighscores) {
-        const start = drawButton(sprites.button, 400, 455, 242, 48, 'Start', 36, TEXT_COLOR);
-        const hs = drawButton(sprites.button, 400, 510, 242, 48, 'Highscores', 36, TEXT_COLOR);
-        const quit = drawButton(sprites.button, 400, 565, 242, 48, 'Quit', 36, TEXT_COLOR);
+        const start = drawButton(sprites.button, 400, 455, 242, 48, 'Start', 36, TEXT_COLOR, 'Begin a new run');
+        const hs = drawButton(sprites.button, 400, 510, 242, 48, 'Highscores', 36, TEXT_COLOR, 'Top 3 scores');
+        const quit = drawButton(sprites.button, 400, 565, 242, 48, 'Quit', 36, TEXT_COLOR, 'Close the game');
         startClicked = wasClicked(start.rect, frameClicks);
         highscoresClicked = wasClicked(hs.rect, frameClicks);
         quitClicked = wasClicked(quit.rect, frameClicks);
       }
 
-      ctx.drawImage(sprites.settingsIcon, 750 - 16, 50 - 16, 32, 32);
-      const gearClicked = frameClicks.some(p => pointInCircle(p.x, p.y, 750, 50, 20));
+      const gearHovered = pointInCircle(mouse.x, mouse.y, 750, 50, 20);
+      if (gearHovered && !settingsOpen && !showHighscores) {
+        const angle = (performance.now() / 1000) * GEAR_SPIN_SPEED;
+        ctx.save();
+        ctx.translate(750, 50);
+        ctx.rotate(angle);
+        ctx.drawImage(sprites.settingsIcon, -23, -23, 46, 46);
+        ctx.restore();
+      } else {
+        ctx.drawImage(sprites.settingsIcon, 750 - 23, 50 - 23, 46, 46);
+      }
+      const gearClicked = wasClickedCircle(750, 50, 20, frameClicks);
       if (gearClicked && !showHighscores) settingsOpen = true;
+
+      if (gearHovered && !settingsOpen && !showHighscores) {
+        hoveredTooltip = { rect: { x: 750 - 20, y: 50 - 20, w: 40, h: 40 }, label: 'Open settings' };
+      }
 
       if (settingsOpen) {
         const result = drawSettingsOverlay(frameClicks, resetConfirmOpen);
-        if (result.closed) { settingsOpen = false;
-          saveSettings(); }
+        if (result.closed) {
+          settingsOpen = false;
+          saveSettings();
+        }
         resetConfirmOpen = result.resetConfirmOpen;
       } else if (showHighscores) {
         const closed = drawHighscoreOverlay(frameClicks);
         if (closed) showHighscores = false;
       }
+
+      drawTooltipIfAny();
 
       if (startClicked) return true;
       if (highscoresClicked) showHighscores = true;
@@ -404,15 +641,13 @@
 
   function drawSettingsOverlay(frameClicks, resetConfirmOpen) {
     overlay(0.5);
-    panel(200, 130, 400, 300);
-    text('Settings', 48, TEXT_COLOR, 400, 180);
+    panel(200, 110, 400, 370);
+    text('Settings', 48, TEXT_COLOR, 400, 160);
 
-    const musicRect = drawToggle(450, 230, !musicMuted, 'Music');
+    const musicRect = drawToggle(450, 210, !musicMuted, 'Music', musicMuted ? 'Music: Off' : 'Music: On');
     const roadLabel = backgroundIsGravel ? 'Gravel Road' : 'Dirt Road';
-    const roadRect = drawToggle(450, 280, backgroundIsGravel, roadLabel);
-
-    const resetBtn = drawButton(sprites.warnButton, 400, 335, 242, 48, 'Reset Score', 36, TEXT_COLOR);
-    const closeBtn = drawButton(sprites.button, 400, 390, 242, 48, 'Close', 36, TEXT_COLOR);
+    const roadRect = drawToggle(450, 260, backgroundIsGravel, roadLabel, backgroundIsGravel ? 'Road: Gravel' : 'Road: Dirt');
+    const darkeningRect = drawToggle(450, 310, darkeningEnabled, 'Darkening', darkeningEnabled ? 'Darkening: On' : 'Darkening: Off');
 
     if (wasClicked(musicRect, frameClicks)) {
       musicMuted = !musicMuted;
@@ -420,21 +655,25 @@
       else playMusic();
     }
     if (wasClicked(roadRect, frameClicks)) backgroundIsGravel = !backgroundIsGravel;
-    if (wasClicked(resetBtn.rect, frameClicks)) resetConfirmOpen = true;
+    if (wasClicked(darkeningRect, frameClicks)) darkeningEnabled = !darkeningEnabled;
 
     let closed = false;
+
     if (resetConfirmOpen) {
-      panel(250, 250, 300, 120);
-      text('Reset Scores?', 28, rgb(RED), 400, 290);
-      const yesBtn = drawButton(sprites.smallButton, 340, 350, 100, 36, 'Yes', 28, [0, 200, 0]);
-      const noBtn = drawButton(sprites.smallButton, 460, 350, 100, 36, 'No', 28, [200, 0, 0]);
+      panel(250, 300, 300, 120);
+      text('Reset Scores?', 28, rgb(RED), 400, 340);
+      const yesBtn = drawButton(sprites.smallButton, 340, 400, 100, 36, 'Yes', 28, [0, 200, 0], 'Confirm reset');
+      const noBtn = drawButton(sprites.smallButton, 460, 400, 100, 36, 'No', 28, [200, 0, 0], 'Cancel');
       if (wasClicked(yesBtn.rect, frameClicks)) {
         Store.set('highscores', []);
         resetConfirmOpen = false;
       }
       if (wasClicked(noBtn.rect, frameClicks)) resetConfirmOpen = false;
-    } else if (wasClicked(closeBtn.rect, frameClicks)) {
-      closed = true;
+    } else {
+      const resetBtn = drawButton(sprites.warnButton, 400, 385, 242, 48, 'Reset Score', 36, TEXT_COLOR, 'Erase saved scores');
+      const closeBtn = drawButton(sprites.button, 400, 440, 242, 48, 'Close', 36, TEXT_COLOR, 'Back to main menu');
+      if (wasClicked(resetBtn.rect, frameClicks)) resetConfirmOpen = true;
+      else if (wasClicked(closeBtn.rect, frameClicks)) closed = true;
     }
 
     return { closed, resetConfirmOpen };
@@ -451,7 +690,7 @@
       text(`${display}   ${score}`, 36, TEXT_COLOR, 400, 250 + idx * 40);
     });
 
-    const closeBtn = drawButton(sprites.button, 400, 400, 242, 48, 'Close', 36, TEXT_COLOR);
+    const closeBtn = drawButton(sprites.button, 400, 400, 242, 48, 'Close', 36, TEXT_COLOR, 'Back to main menu');
     return wasClicked(closeBtn.rect, frameClicks);
   }
 
@@ -474,6 +713,8 @@
     keyDownQueue = [];
     while (true) {
       await nextFrame();
+      const frameClicks = consumeClicks();
+
       for (const k of keyDownQueue) {
         if (k === 'Backspace' && name.length > 0) name = name.slice(0, -1);
         else if (k === 'Enter' && name.length > 0 && name.length <= 5) {
@@ -486,9 +727,28 @@
       keyDownQueue = [];
 
       clear(BG_COLOR);
-      text('Enter Your Name', 48, TEXT_COLOR, 400, 200);
-      text(name + '_'.repeat(5 - name.length), 48, TEXT_COLOR, 400, 300);
-      text('A-Z, Backspace, Enter', 32, TEXT_COLOR, 400, 400);
+      if (touchMode) {
+        text('Enter Your Name', 40, TEXT_COLOR, 400, 90);
+        text(name + '_'.repeat(5 - name.length), 44, TEXT_COLOR, 400, 155);
+
+        const tapped = drawTouchKeyboard(frameClicks);
+        for (const action of tapped) {
+          if (action === 'BACK') {
+            if (name.length > 0) name = name.slice(0, -1);
+          } else if (action === 'ENTER') {
+            if (name.length > 0 && name.length <= 5) {
+              keyDownQueue = [];
+              return name.padEnd(5, '-');
+            }
+          } else if (name.length < 5) {
+            name += action;
+          }
+        }
+      } else {
+        text('Enter Your Name', 48, TEXT_COLOR, 400, 200);
+        text(name + '_'.repeat(5 - name.length), 48, TEXT_COLOR, 400, 300);
+        text('A-Z, Backspace, Enter', 32, TEXT_COLOR, 400, 400);
+      }
     }
   }
 
@@ -529,7 +789,7 @@
     let daynightStep = 0;
     let daynightPause = 0;
 
-    let cleanupDone = false; // flag to ensure clean exit
+    let cleanupDone = false;
 
     function reset() {
       playerPos = [375, 500];
@@ -553,9 +813,6 @@
     while (true) {
       await nextFrame();
       const now = performance.now();
-      // Only advance the simulation clock while unpaused, so time spent
-      // in the pause menu doesn't pile up and get replayed all at once
-      // (as a sudden jump/burst) the moment the game resumes.
       if (!isPaused) acc += now - last;
       last = now;
 
@@ -578,17 +835,21 @@
         panel(200, 150, 400, 300);
         text('Paused', 56, TEXT_COLOR, 400, 210);
 
-        const resumeBtn = drawButton(sprites.button, 400, 280, 242, 48, 'Resume', 36, TEXT_COLOR);
-        const restartBtn = drawButton(sprites.button, 400, 340, 242, 48, 'Restart', 36, TEXT_COLOR);
-        const quitBtn = drawButton(sprites.button, 400, 400, 242, 48, 'Quit to Menu', 36, TEXT_COLOR);
+        resetTooltip();
+        const resumeBtn = drawButton(sprites.button, 400, 280, 242, 48, 'Resume', 36, TEXT_COLOR, 'Continue playing');
+        const restartBtn = drawButton(sprites.button, 400, 340, 242, 48, 'Restart', 36, TEXT_COLOR, 'Start over');
+        const quitBtn = drawButton(sprites.button, 400, 400, 242, 48, 'Quit to Menu', 36, TEXT_COLOR, 'Back to main menu');
 
-        if (wasClicked(resumeBtn.rect, frameClicks)) { isPaused = false;
-          playMusic(); }
-        if (wasClicked(restartBtn.rect, frameClicks)) { reset();
+        if (wasClicked(resumeBtn.rect, frameClicks)) {
           isPaused = false;
-          playMusic(); }
+          playMusic();
+        }
+        if (wasClicked(restartBtn.rect, frameClicks)) {
+          reset();
+          isPaused = false;
+          playMusic();
+        }
         if (wasClicked(quitBtn.rect, frameClicks)) {
-          // Force clean exit: clear canvas and reset state
           cleanupDone = true;
           isPaused = false;
           clear(BG_COLOR);
@@ -597,14 +858,17 @@
           playMusic();
           return;
         }
+        drawTooltipIfAny();
         continue;
       }
 
       while (acc >= STEP_MS) {
         acc -= STEP_MS;
 
-        if (keys.has('ArrowLeft') && playerPos[0] > playerRadius) playerPos[0] -= playerSpeed;
-        if (keys.has('ArrowRight') && playerPos[0] < 750 - playerRadius) playerPos[0] += playerSpeed;
+        const moveLeft = keys.has('ArrowLeft') || (touchMode && touchZoneActive(MOVE_LEFT_X, MOVE_BTN_Y, MOVE_BTN_R));
+        const moveRight = keys.has('ArrowRight') || (touchMode && touchZoneActive(MOVE_RIGHT_X, MOVE_BTN_Y, MOVE_BTN_R));
+        if (moveLeft && playerPos[0] > playerRadius) playerPos[0] -= playerSpeed;
+        if (moveRight && playerPos[0] < 750 - playerRadius) playerPos[0] += playerSpeed;
 
         objectPos[1] += objectSpeed;
 
@@ -624,21 +888,29 @@
           if (daynightState === 'darken') {
             brightness = Math.max(95, brightness - 8);
             daynightStep += 1;
-            if (daynightStep >= 20) { daynightState = 'pause_dark';
-              daynightPause = 0; }
+            if (daynightStep >= 20) {
+              daynightState = 'pause_dark';
+              daynightPause = 0;
+            }
           } else if (daynightState === 'pause_dark') {
             daynightPause += 1;
-            if (daynightPause >= 5) { daynightState = 'lighten';
-              daynightStep = 0; }
+            if (daynightPause >= 5) {
+              daynightState = 'lighten';
+              daynightStep = 0;
+            }
           } else if (daynightState === 'lighten') {
             brightness = Math.min(255, brightness + 8);
             daynightStep += 1;
-            if (daynightStep >= 20) { daynightState = 'pause_light';
-              daynightPause = 0; }
+            if (daynightStep >= 20) {
+              daynightState = 'pause_light';
+              daynightPause = 0;
+            }
           } else if (daynightState === 'pause_light') {
             daynightPause += 1;
-            if (daynightPause >= 5) { daynightState = 'darken';
-              daynightStep = 0; }
+            if (daynightPause >= 5) {
+              daynightState = 'darken';
+              daynightStep = 0;
+            }
           }
         }
 
@@ -653,6 +925,14 @@
       }
 
       drawGameFrame({ bgImage, bgScroll, bgHeight, playerPos, playerRadius, objectPos, score, brightness });
+
+      if (touchMode && !ended) {
+        drawMovementControls();
+        if (drawTouchPauseButton(frameClicks)) {
+          isPaused = true;
+          pauseMusic();
+        }
+      }
 
       if (ended) {
         pauseMusic();
@@ -674,9 +954,34 @@
     ctx.drawImage(sprites.enemy, objectPos[0], objectPos[1], 50, 104);
 
     text(`Score: ${score}`, 36, TEXT_COLOR, 10, 28, 'left');
-    text('ESC: Menu', 24, TEXT_COLOR, 10, 62, 'left');
+    text(touchMode ? 'Tap gear: Menu' : 'ESC: Menu', 24, TEXT_COLOR, 10, 62, 'left');
 
-    if (brightness < 255) overlay((255 - brightness) / 255);
+    if (darkeningEnabled && brightness < 255) {
+      overlay((255 - brightness) / 255);
+
+      const headlightAlpha = getHeadlightAlpha(brightness);
+      if (headlightAlpha > 0) {
+        const lw = sprites.lights.width,
+          lh = sprites.lights.height;
+        const lightsX = playerPos[0] - lw / 2;
+        const lightsY = (playerPos[1] - 52) - lh / 2;
+        overlayCtx.globalAlpha = headlightAlpha;
+        overlayCtx.globalCompositeOperation = 'destination-out';
+        overlayCtx.drawImage(sprites.lights, lightsX, lightsY, lw, lh);
+        overlayCtx.globalCompositeOperation = 'source-over';
+        overlayCtx.globalAlpha = 1;
+      }
+
+      ctx.drawImage(overlayCanvas, 0, 0);
+    }
+  }
+
+  const HEADLIGHT_ON_BRIGHTNESS = 200;
+  const HEADLIGHT_MIN_BRIGHTNESS = 95;
+  function getHeadlightAlpha(brightness) {
+    if (brightness >= HEADLIGHT_ON_BRIGHTNESS) return 0;
+    const t = (HEADLIGHT_ON_BRIGHTNESS - brightness) / (HEADLIGHT_ON_BRIGHTNESS - HEADLIGHT_MIN_BRIGHTNESS);
+    return Math.max(0, Math.min(1, t));
   }
 
   function randInt(min, max) {

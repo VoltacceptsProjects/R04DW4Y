@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width,initial-scale=1.0">
@@ -39,12 +40,15 @@
             image-rendering: pixelated;
             background: #000;
             cursor: none;
+            touch-action: none;
+            -webkit-user-select: none;
+            user-select: none;
         }
 
         #crosshair-cursor {
             position: absolute;
-            width: 24px;
-            height: 24px;
+            width: 32px;
+            height: 32px;
             margin: 0;
             pointer-events: none;
             transition: opacity 0.15s;
@@ -52,6 +56,7 @@
             z-index: 3;
             image-rendering: pixelated;
         }
+
         #crosshair-cursor.active {
             opacity: 1;
         }
@@ -69,6 +74,7 @@
             text-transform: uppercase;
             background: #000;
         }
+
         #loading::after {
             content: '';
             display: inline-block;
@@ -76,15 +82,31 @@
             animation: dots 1.2s steps(4, end) infinite;
             overflow: hidden;
         }
+
         @keyframes dots {
-            0% { content: ''; }
-            25% { content: '.'; }
-            50% { content: '..'; }
-            75% { content: '...'; }
-            100% { content: ''; }
+            0% {
+                content: '';
+            }
+
+            25% {
+                content: '.';
+            }
+
+            50% {
+                content: '..';
+            }
+
+            75% {
+                content: '...';
+            }
+
+            100% {
+                content: '';
+            }
         }
     </style>
 </head>
+
 <body>
     <div id="screen">
         <canvas id="canvas" width="800" height="600"></canvas>
@@ -94,4 +116,5 @@
 
     <script src="./game.js"></script>
 </body>
+
 </html>
