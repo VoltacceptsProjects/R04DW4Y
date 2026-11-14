@@ -88,3 +88,11 @@ instead of silently doing nothing.
 
 Saves (settings + highscores) now live in the browser's `localStorage`
 instead of an IndexedDB-backed PyScript store / `.ini` / pickle file.
+
+
+
+
+
+# CREDITS
+Music: VO!DWiNG
+Sprites: Voltaccept
